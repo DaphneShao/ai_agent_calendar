@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import express from "express";
 import { Request, Response } from "express";
 import OpenAI from "openai";
+import { ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam } from "openai/resources";
 
 dotenv.config();
 
@@ -53,38 +54,62 @@ const openai = new OpenAI({
   apiKey: process.env.DEEPSEEKAI_API_KEY,
 });
 
+let currentConversation: (ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam)[] = [];
+let naturalLanguageConversation: (ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam)[] = [];
+// AI Function calling
 async function queryAI(prompt: string) {
-  const completion = await openai.chat.completions.create({
-      model: "deepseek-chat",
-      // 强化版提示词模板
-      messages: [{
-        role: 'system',
-        content: `请严格按以下 JSON 格式响应（仅返回JSON，不要其他文本）：
-      {
-        "function_call": {
-          "name": "check_shipping|change_shipping_address",
-          "arguments": {
-            "order_id": "123",
-            "new_address": "新地址（仅修改时需要）"
-          }
+  if (currentConversation.length == 0) {
+    currentConversation.push({
+      role: 'system',
+      content: `请严格按以下 JSON 格式响应（仅返回JSON，不要其他文本）：
+    {
+      "function_call": {
+        "name": "check_shipping|change_shipping_address",
+        "arguments": {
+          "order_id": "123",
+          "new_address": "新地址（仅修改时需要）"
         }
       }
-      
-      示例：
-      问："查订单 123 状态"
-      答：{"function_call":{"name":"check_shipping","arguments":{"order_id":"123"}}}
-      
-      问："修改订单 456 地址到 789 Oak St"
-      答：{"function_call":{"name":"change_shipping_address","arguments":{"order_id":"456","new_address":"789 Oak St"}}}
-      `,
-      }, {
-        role: 'user',
-        content: prompt,
-      }],
+    }
+    
+    示例：
+    问："查订单 123 状态"
+    答：{"function_call":{"name":"check_shipping","arguments":{"order_id":"123"}}}
+    
+    问："修改订单 456 地址到 789 Oak St"
+    答：{"function_call":{"name":"change_shipping_address","arguments":{"order_id":"456","new_address":"789 Oak St"}}}
+    `,
+    });
+  }
+  currentConversation.push({ role: 'user', content: prompt });
+
+  const completion = await openai.chat.completions.create({
+      model: "deepseek-chat",
+      messages: currentConversation,
       response_format:{'type': 'json_object'}
   });
   const messageContent = completion.choices[0].message.content;
   return messageContent;
+}
+
+// AI natural langueage processing according to the currentConversation
+async function getNaturalLanguageResponse(userPrompt: string, functionResult: any) {
+  naturalLanguageConversation = [
+    { 
+      role: 'system', 
+      content: '你是一个友好的客服助手。请根据用户的问题和系统返回的结果，用自然语言回复用户。不要返回JSON格式，使用正常对话语气。' 
+    },
+    { 
+      role: 'user', 
+      content: `用户问题: ${userPrompt}\n系统结果: ${JSON.stringify(functionResult)}` 
+    }
+  ];
+  
+  const response = await openai.chat.completions.create({
+    model: "deepseek-chat",
+    messages: naturalLanguageConversation
+  });
+  return response.choices[0].message.content;
 }
 
 // ==================== Express 服务 ====================
@@ -118,25 +143,34 @@ app.post("/api/query", async (req: Request, res: Response) => {
 
   if (parsedResponse?.function_call) {
     const { name, arguments: args } = parsedResponse.function_call;
-
+    let functionResult;
     switch (name) {
       case "check_shipping":
         if (!args?.order_id) {
           res.status(400).json({ error: "Missing order_id" });
         }
-        res.json(checkShipping(args.order_id));
+        functionResult = checkShipping(args.order_id);
         break;
 
       case "change_shipping_address":
         if (!args?.order_id || !args?.new_address) {
           res.status(400).json({ error: "Missing parameters" });
         }
-        res.json(changeShippingAddress(args.order_id, args.new_address));
+        functionResult=changeShippingAddress(args.order_id, args.new_address);
         break;
 
       default:
         res.status(400).json({ error: "Unsupported function" });
     }
+    // Get natural language response
+    const naturalResponse = await getNaturalLanguageResponse(message, functionResult);
+
+    // Return both the raw data and the natural language response
+    res.json({
+      data: functionResult,
+      message: naturalResponse
+    });
+
   } else {
     res.json({
       message:
