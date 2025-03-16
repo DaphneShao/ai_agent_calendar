@@ -4,7 +4,7 @@ import express from "express";
 import { Request, Response } from "express";
 import OpenAI from "openai";
 import { ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam } from "openai/resources";
-
+import cors from "cors";
 dotenv.config();
 
 // ==================== 类型定义 ====================
@@ -114,6 +114,11 @@ async function getNaturalLanguageResponse(userPrompt: string, functionResult: an
 
 // ==================== Express 服务 ====================
 const app = express();
+app.use(cors({
+  origin: 'http://localhost:5173', // Allow your frontend origin
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
 app.use(express.json());
 
 app.post("/api/query", async (req: Request, res: Response) => {
