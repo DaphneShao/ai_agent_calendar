@@ -2,7 +2,9 @@ import fetch from "node-fetch";
 import dotenv from "dotenv";
 import express from "express";
 import { Request, Response } from "express";
-
+import OpenAI from "openai";
+import { ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam } from "openai/resources";
+import cors from "cors";
 dotenv.config();
 
 // ==================== 类型定义 ====================
@@ -47,57 +49,90 @@ function changeShippingAddress(
 }
 
 // ==================== AI 服务 ====================
-const AI_API_URL =
-  process.env.AI_API_URL || "http://10.0.0.168:8080/api/generate";
+const openai = new OpenAI({
+  baseURL: 'https://api.deepseek.com',
+  apiKey: process.env.DEEPSEEKAI_API_KEY,
+});
 
+let currentConversation: (ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam)[] = [];
+let naturalLanguageConversation: (ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam)[] = [];
+// AI Function calling
 async function queryAI(prompt: string) {
-  const response = await fetch(AI_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "deepseek-r1:14b",
-      // 强化版提示词模板
-      prompt: `请严格按以下 JSON 格式响应（仅返回JSON，不要其他文本）：
-      {
-        "function_call": {
-          "name": "check_shipping|change_shipping_address",
-          "arguments": {
-            "order_id": "123",
-            "new_address": "新地址（仅修改时需要）"
-          }
+  if (currentConversation.length == 0) {
+    currentConversation.push({
+      role: 'system',
+      content: `请严格按以下 JSON 格式响应（仅返回JSON，不要其他文本）：
+    {
+      "function_call": {
+        "name": "check_shipping|change_shipping_address",
+        "arguments": {
+          "order_id": "123",
+          "new_address": "新地址（仅修改时需要）"
         }
       }
-      
-      用户请求：${prompt}
-      
-      示例：
-      问："查订单 123 状态"
-      答：{"function_call":{"name":"check_shipping","arguments":{"order_id":"123"}}}
-      
-      问："修改订单 456 地址到 789 Oak St"
-      答：{"function_call":{"name":"change_shipping_address","arguments":{"order_id":"456","new_address":"789 Oak St"}}}
-      `,
-      stream: false,
-      options: {
-        temperature: 0.3, // 降低随机性
-      },
-    }),
+    }
+    
+    示例：
+    问："查订单 123 状态"
+    答：{"function_call":{"name":"check_shipping","arguments":{"order_id":"123"}}}
+    
+    问："修改订单 456 地址到 789 Oak St"
+    答：{"function_call":{"name":"change_shipping_address","arguments":{"order_id":"456","new_address":"789 Oak St"}}}
+    `,
+    });
+  }
+  currentConversation.push({ role: 'user', content: prompt });
+
+  const completion = await openai.chat.completions.create({
+      model: "deepseek-chat",
+      messages: currentConversation,
+      response_format:{'type': 'json_object'}
   });
-  return response.json();
+  const messageContent = completion.choices[0].message.content;
+  return messageContent;
+}
+
+// AI natural langueage processing according to the currentConversation
+async function getNaturalLanguageResponse(userPrompt: string, functionResult: any) {
+  naturalLanguageConversation = [
+    { 
+      role: 'system', 
+      content: '你是一个友好的客服助手。请根据用户的问题和系统返回的结果，用自然语言回复用户。不要返回JSON格式，使用正常对话语气。' 
+    },
+    { 
+      role: 'user', 
+      content: `用户问题: ${userPrompt}\n系统结果: ${JSON.stringify(functionResult)}` 
+    }
+  ];
+  
+  const response = await openai.chat.completions.create({
+    model: "deepseek-chat",
+    messages: naturalLanguageConversation
+  });
+  return response.choices[0].message.content;
 }
 
 // ==================== Express 服务 ====================
 const app = express();
+app.use(cors({
+  origin: 'http://localhost:5173', // Allow your frontend origin
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
 app.use(express.json());
 
 app.post("/api/query", async (req: Request, res: Response) => {
   const { message } = req.body;
 
   const aiResponse = await queryAI(message);
-  console.log("Raw AI Response:", aiResponse.response);
+  console.log("AI Response:", aiResponse);
 
+  if (!aiResponse) {
+    throw new Error("No response from AI");
+  }
+  
   // 增强版 JSON 提取
-  const jsonMatch = aiResponse.response.match(/{[\s\S]*}/); // 匹配第一个完整 JSON 对象
+  const jsonMatch = aiResponse.match(/{[\s\S]*}/); // 匹配第一个完整 JSON 对象
   if (!jsonMatch) {
     throw new Error("No JSON found in AI response");
   }
@@ -113,25 +148,34 @@ app.post("/api/query", async (req: Request, res: Response) => {
 
   if (parsedResponse?.function_call) {
     const { name, arguments: args } = parsedResponse.function_call;
-
+    let functionResult;
     switch (name) {
       case "check_shipping":
         if (!args?.order_id) {
           res.status(400).json({ error: "Missing order_id" });
         }
-        res.json(checkShipping(args.order_id));
+        functionResult = checkShipping(args.order_id);
         break;
 
       case "change_shipping_address":
         if (!args?.order_id || !args?.new_address) {
           res.status(400).json({ error: "Missing parameters" });
         }
-        res.json(changeShippingAddress(args.order_id, args.new_address));
+        functionResult=changeShippingAddress(args.order_id, args.new_address);
         break;
 
       default:
         res.status(400).json({ error: "Unsupported function" });
     }
+    // Get natural language response
+    const naturalResponse = await getNaturalLanguageResponse(message, functionResult);
+
+    // Return both the raw data and the natural language response
+    res.json({
+      data: functionResult,
+      message: naturalResponse
+    });
+
   } else {
     res.json({
       message:

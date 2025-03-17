@@ -16,11 +16,25 @@ function App() {
 
   const [input, setInput] = useState('');
 
-  const sendMessage = () =>{
+  const sendMessage = async () =>{
+    console.log("old messages",messages);
     if (input.trim()) {
-      setMessages([...messages, { sender: 'customer', message: input }]);
+      // update and update the page
+      setMessages(messages => [...messages, { sender: 'customer', message: input }]);
       setInput('');
     }
+    console.log("added message",messages);
+    // send the message to the server http://localhost:3000/api/query
+    const response = await fetch('http://localhost:3000/api/query',{
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({message: input})
+    })
+    const data = await response.json();
+    setMessages( messages => [...messages,{ sender:'AI', message: data.message }]);
+    console.log("new messages",messages);
   }
 
   return (
